@@ -1,0 +1,167 @@
+---
+title: "workrise-where-worker"
+format: html
+editor: visual
+---
+
+```{r setup, echo=FALSE, warning=FALSE,message=FALSE}
+# LIBS
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(tigris) #install.packages("tigris")
+library(sf)
+library(geojsonio) #install.packages("geojsonio")
+library(rmapshaper) #install.packages("rmapshaper")
+library(mapboxapi) #install.packages("mapboxapi")
+
+#import metrics data
+national_metrics <- read_excel("data/State Puma Low Wage update 3.xlsx",sheet="national_wage")
+state_metrics <- read_excel("data/State Puma Low Wage update 3.xlsx",sheet="state_wage")
+puma_metrics <- read_excel("data/State Puma Low Wage update 3.xlsx",sheet="puma_wage")
+
+#import industry data
+national_industry <- read_excel("data/State Puma Low Wage update 3.xlsx",sheet="national_industry_concentration")
+puma_industry <- read_excel("data/State Puma Low Wage update 3.xlsx",sheet="puma_industry_concentration")
+state_industry <- read_excel("data/State Puma Low Wage update 3.xlsx",sheet="state_industry_concentration")
+
+#import shapes data
+puma_shapes <- tigris::pumas(year=2019,cb = TRUE)
+state_shapes <- tigris::states(resolution="5m",year=2022,cb = TRUE)
+
+#define function to extract bounding box of shape and add to dataframe
+bbox_wrap <- function(x) sf::st_bbox(x) %>% as.vector()
+```
+
+```{r}
+#create state mbtiles
+state_shapes %>% 
+	mutate(id = as.numeric(GEOID)) %>% 
+	geo_join(state_metrics,by_sp="GEOID",by_df="statefip",how="inner") %>% 
+	
+	tippecanoe(output = "data_output/workrise-where-worker-state.mbtiles",
+						 other_options = "--use-attribute-for-id=id",
+						 layer_name = "state",overwrite = T)
+```
+
+```{r}
+#create puma mbtiles
+puma_shapes %>% 
+	mutate(id = as.numeric(GEOID10)) %>% 
+	geo_join(puma_metrics,by_sp="GEOID10",by_df="state_puma",how="inner") %>% 
+	
+	tippecanoe(output = "data_output/workrise-where-worker-puma.mbtiles",
+						 other_options = "--use-attribute-for-id=id",
+						 layer_name = "puma")
+```
+
+```{r}
+#create a pivotable dataframe 
+state_industry_prep <- state_industry %>%
+	arrange(statefip, desc(lw_concentration)) %>%
+	group_by(statefip) %>%
+	mutate(row_num = row_number())
+
+#pivot
+state_metrics %>%
+	#create a wide format for industry codes
+	left_join(
+		state_industry_prep %>%
+			pivot_wider(
+				id_cols = c(statefip),
+				names_from = c(row_num),
+				values_from = c(indnaics),
+				names_prefix = "ind"
+			)
+	) %>%
+	#join industry data
+	left_join(
+		#create a wide format for industry concentrations
+		state_industry_prep %>%
+			pivot_wider(
+				id_cols = c(statefip),
+				names_from = c(row_num),
+				values_from = c(lw_concentration),
+				names_prefix = "concentration"
+			)
+	) %>% 
+	#join state shapes
+	left_join(
+		state_shapes %>% 
+			as.data.frame() %>%
+			mutate(bbox = map(geometry,bbox_wrap)) %>% 
+			select(statefip=STATEFP,abbr = STUSPS,name=NAME,bbox)
+	) %>% 
+	jsonlite::write_json("../src/data/state-data.json")
+```
+
+```{r}
+#create a pivotable dataframe 
+puma_industry_prep <- puma_industry %>%
+	arrange(state_puma, desc(lw_concentration)) %>%
+	group_by(state_puma) %>%
+	mutate(row_num = row_number())
+
+#pivot
+puma_metrics %>%
+	#extract state fips code
+	mutate(statefip = substr(state_puma, 1, 2)) %>% 
+	#create a wide format for industry codes
+	left_join(
+		puma_industry_prep %>%
+			pivot_wider(
+				id_cols = c(state_puma),
+				names_from = c(row_num),
+				values_from = c(indnaics),
+				names_prefix = "ind"
+			)
+	) %>%
+	#join industry data
+	left_join(
+		#create a wide format for industry concentrations
+		puma_industry_prep %>%
+			pivot_wider(
+				id_cols = c(state_puma),
+				names_from = c(row_num),
+				values_from = c(lw_concentration),
+				names_prefix = "concentration"
+			)
+	) %>% 
+	#join shapes data
+	left_join(
+		puma_shapes %>% 
+			mutate(bbox = map(geometry,bbox_wrap)) %>% 
+			as.data.frame() %>% 
+			select(state_puma = GEOID10,name = NAME10,bbox)
+	) %>% 
+	jsonlite::write_json("../src/data/puma-data.json")
+```
+
+```{r}
+#create industry lookup json
+read_excel("data/industry_codes.xlsx",sheet="2017 Census Industry Code List") %>% 
+	select(indnaics,industry) %>% 
+	unique() %>% 
+	mutate(industry = stringr::str_to_sentence(industry)) %>% 
+	mutate(industry = case_when(
+		industry == "Administrative and support and waste management services" ~ "Administrative, support, and waste management services",
+		industry == "Real estate and rental and leasing" ~ "Real estate, rental, and leasing",
+		.default = industry
+	)) %>% 
+	jsonlite::write_json("../src/data/industry-lookup.json")
+```
+
+```{r}
+#pivot national industry numbers wide
+national_industry %>% 
+	select(concentration = lw_concentration,ind=indnaics) %>% 
+	mutate(id = row_number()) %>% 
+	pivot_wider(names_from=id,values_from = c(concentration,ind),names_sep = "") %>% 
+	#add in national metrics
+	cbind(national_metrics) %>% 
+	#don't make it an array
+	jsonlite::unbox() %>% 
+	#write
+	jsonlite::write_json("../src/data/national-data.json")
+```
+
