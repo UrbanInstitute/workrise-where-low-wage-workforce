@@ -11,7 +11,7 @@ This repo powers the WorkRise data tool “Where is the Low Wage Worker?”. The
 
 ### Hosting Location
 
-https://www.workrisenetwork.org/working-knowledge/where-low-wage-workforce
+https://www.workrisenetwork.org/publications/where-low-wage-workforce
 
 ## Data
 
